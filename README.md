@@ -108,10 +108,10 @@ The code is based on an older version of [DVRL's PyTorch implementation](https:/
 ```
 
 ```
-@inproceedings{ma2020particle,
-    Title={Particle Filter Recurrent Neural Networks},
-    Author={Ma, Xiao and Karkus, Peter and Hsu, David and Lee, Wee Sun},
-    Booktitle = {AAAI Conference on Artificial Intelligence (AAAI)},
-    Year = {2020}
+@article{ma2019particle,
+  title={Particle Filter Recurrent Neural Networks},
+  author={Ma, Xiao and Karkus, Peter and Hsu, David and Lee, Wee Sun},
+  journal={arXiv preprint arXiv:1905.12885},
+  year={2019}
 }
 ```
