@@ -35,8 +35,6 @@ As well as other dependencies by running
 ```
 pip install -r requirements.txt
 ```
-in the main folder.
-If you're running into an error with matplotlib on MacOS when running the RNN on MountainHike, you can use [this simple solution](https://stackoverflow.com/a/21789908/3730984).
 
 ### Download the data
 To test on the Natural Flickering Atari games benchmark, please first download the data [here](https://drive.google.com/drive/folders/1L2bFzwSzhjs540RHDVh8uVKsd7BiJxgM?usp=sharing), and put it at the root of your folder.
