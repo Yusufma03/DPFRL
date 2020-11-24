@@ -29,7 +29,7 @@ rl_setting:
 
 log:
   log_interval : 100
-  save_model_interval : 0
+  save_model_interval : 10000
 
   save_reconstruction_interval: 0
   save_particle_reconstruction: False

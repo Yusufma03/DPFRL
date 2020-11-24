@@ -164,6 +164,9 @@ def log_and_print(j, num_updates, T, id_tmp_dir, tracking,
     writer.add_scalar('reward/true_reward', last_true_result, num_frames)
     writer.add_scalar('reward/true_reward_test', last_true_result_test,
             num_frames)
+    writer.add_scalar('loss/value_loss', value_loss.item(), num_frames)
+    writer.add_scalar('loss/action_loss', action_loss.item(), num_frames)
+    writer.add_scalar('loss/entropy', dist_entropy.item(), num_frames)
     # Log scalars
     _run.log_scalar("result.true", last_true_result, num_frames)
     _run.log_scalar("result.true_test", last_true_result_test, num_frames)
