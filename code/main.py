@@ -17,17 +17,19 @@ from sacred.utils import apply_backspaces_and_linefeeds
 from baselines.common.vec_env.dummy_vec_env import DummyVecEnv
 from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
 from baselines.common.vec_env.vec_normalize import VecNormalize
-from torch.optim.lr_scheduler import LambdaLR
 
+# Own imports
 from envs import make_env
 from storage import RolloutStorage
 import utils
+import ipdb as pdb
+
 from tensorboardX import SummaryWriter
+
 from PIL import Image
-from pfrnn_model import PFRNN_Policy
 
 # Create Sacred Experiment
-ex = Experiment("POMRL")
+ex = Experiment("DPFRL")
 ex.captured_out_filter = apply_backspaces_and_linefeeds
 # np.seterr(all='raise')
 
@@ -105,8 +107,6 @@ def general_config(cuda, algorithm, environment, rl_setting, loss_function, log)
             # See here: https://github.com/opencv/opencv/issues/5150
             multiprocessing.set_start_method('spawn')
 
-    imgnet_train = './train_imgnet.pkl'
-    imgnet_test = './test_imgnet.pkl'
     game_name = environment['name'].split('No')[0]
     try:
         bk_value = bk_config[game_name]
@@ -195,6 +195,7 @@ def setup(rl_setting, device, _run, _log, log, seed, cuda):
         init_states = init_states.to(device)
         init_states_test = init_states_test.to(device)
     except:
+
         init_states = utils.cudify_state(init_states, device)
         init_states_test = utils.cudify_state(init_states_test, device)
 
@@ -235,10 +236,9 @@ def setup(rl_setting, device, _run, _log, log, seed, cuda):
 def create_model(envs, algorithm, rl_setting, environment):
     """
     Creates the actor-critic model.
-
     Note that those values can be overwritten by the environment (see config() function).
 
-    Args:
+    Argse
         envs: Vector of environments. Usually created by register_and_create_Envs()
         All other args are automatically provided by sacred by passing the equally named
         configuration variables that are either defined in the yaml files or the command line.
@@ -249,7 +249,13 @@ def create_model(envs, algorithm, rl_setting, environment):
     action_space = envs.action_space
     nr_inputs = envs.observation_space.shape[0]
 
+    from pfrnn_model import PFRNN_Policy
     # Pass in configuration only from algorithm.model
+    model_params = algorithm['model']
+    model_params['num_particles'] =\
+        algorithm['particle_filter']['num_particles']
+    model_params['particle_aggregation'] =\
+        algorithm['particle_filter']['particle_aggregation']
     model = PFRNN_Policy(
         action_space,
         nr_inputs,
@@ -326,11 +332,11 @@ def noisify_obs(obs, video, pointer, envs, rl_setting, environment, bk_value):
 
     n_type = environment['noise_type']
 
-    if 'back' in n_type:
+    if 'video' in n_type or 'quarter' in n_type or 'back' in n_type:
         fake_imgs = batch_sample_imgs(video, pointer)
         fake_imgs = fake_imgs.astype(float) / 255
 
-    if 'blank' in n_type:
+    if 'blank' in n_type and n_type != 'blank_back':
         blank_mask = np.random.choice(
             [0, 1],
             size=rl_setting['num_processes'],
@@ -341,8 +347,24 @@ def noisify_obs(obs, video, pointer, envs, rl_setting, environment, bk_value):
             (rl_setting['num_processes'], *obs_dims))
         if n_type == 'blank':
             return obs * blank_mask, pointer, blank_mask
+        elif n_type == 'blank_video':
+            pointer = (pointer[0], (pointer[1]+1) % vid_len)
+            return obs * blank_mask + fake_imgs * (1 - blank_mask), pointer, blank_mask
+        else:
+            raise NotImplementedError
 
-    if 'back' in n_type:
+    elif 'quarter' in n_type:
+        blank_mask = np.random.choice(
+            [0, 1, 2, 3],
+            size=rl_setting['num_processes'],
+            p=[0.25, 0.25, 0.25, 0.25])
+
+        blank_mask = get_quarter_mask(blank_mask)[:, None, :, :]
+        pointer = (pointer[0], (pointer[1]+1) % vid_len)
+        return obs * blank_mask + fake_imgs * (1 - blank_mask), pointer,\
+            blank_mask
+ 
+    elif 'back' in n_type:
         mask = get_bk_mask(obs, bk_value)
         pointer = (pointer[0], (pointer[1]+1) % vid_len)
         noise_obs = obs * (1 - mask) + fake_imgs * mask
@@ -350,20 +372,29 @@ def noisify_obs(obs, video, pointer, envs, rl_setting, environment, bk_value):
         if n_type == 'back':
             return noise_obs, pointer, mask
         elif n_type == 'blank_back':
+            blank_mask = np.random.choice(
+                [0, 1],
+                size=rl_setting['num_processes'],
+                p=[environment['p_blank'], 1-environment['p_blank']])
+            obs_dims = [1] * len(envs.observation_space.shape)
+            blank_mask = np.reshape(
+                blank_mask,
+                (rl_setting['num_processes'], *obs_dims))
             return noise_obs * blank_mask + fake_imgs * (1 - blank_mask), pointer, blank_mask
-        else:
-            raise NotImplementedError
 
-    if n_type == 'normal':
+    elif n_type == 'normal':
         # ugly hack to create the mask
         mask = get_bk_mask(obs, bk_value)
         return obs, pointer, mask
 
+    else:
+        raise NotImplementedError
+
+
 @ex.capture
 def run_model(actor_critic, current_memory, envs,
               environment, rl_setting, device, algorithm, 
-              video,
-              pointer):
+              video, pointer):
     """
     Runs the model.
 
@@ -381,7 +412,7 @@ def run_model(actor_critic, current_memory, envs,
 
     # Run model
     policy_return = actor_critic(
-        current_memory=current_memory
+        current_memory=current_memory,
         )
 
     # Execute on environment
@@ -425,9 +456,11 @@ def run_model(actor_critic, current_memory, envs,
     current_memory['current_obs'] = obs
 
     # Create new latent states for new episodes
+    num_particles = algorithm['particle_filter']['num_particles']
+    masks_particle = masks.repeat(num_particles, 1)
     current_memory['states'] = actor_critic.vec_conditional_new_latent_state(
         policy_return.latent_state,
-        masks)
+        masks_particle)
 
     # Set first action to 0 for new episodes
     # Also, if action is discrete, convert it to one-hot vector
@@ -457,6 +490,7 @@ def track_values(tracked_values, policy_return, algorithm):
 
     return tracked_values
 
+
 @ex.capture
 def track_rewards(tracked_rewards, reward, masks, blank_mask, rl_setting,
         environment):
@@ -484,15 +518,16 @@ def track_rewards(tracked_rewards, reward, masks, blank_mask, rl_setting,
 
     return tracked_rewards['final_rewards'], avg_nr_observed, tracked_rewards['num_ended_episodes']
 
+
 @ex.capture
-def load_imgnet_images(imgnet_train, imgnet_test):
+def load_imgnet_images():
     import pickle
     print("start to load imagenet videos")
 
-    with open(imgnet_train, 'rb') as fin:
+    with open('./train_imgnet.pkl', 'rb') as fin:
         train_trajs = pickle.load(fin)
 
-    with open(imgnet_test, 'rb') as fin:
+    with open('./test_imgnet.pkl', 'rb') as fin:
         test_trajs = pickle.load(fin)
     
     return train_trajs, test_trajs
@@ -510,7 +545,8 @@ def main(_run,
          rl_setting,
          log,
          algorithm,
-         loss_function):
+         loss_function,
+         ):
     """
     Entry point. Contains main training loop.
     """
@@ -519,8 +555,6 @@ def main(_run,
     # to compute target values and 'current_memory' which maintains the last action/observation/latent_state values
     id_tmp_dir, envs, test_envs, actor_critic, rollouts, current_memory,\
         current_memory_test = setup()
-
-    num_processes = rl_setting['num_processes']
 
     if environment['name'] != 'DeathValley-v0':
         img_trajs, img_trajs_test = load_imgnet_images()
@@ -571,13 +605,11 @@ def main(_run,
     else:
         raise NotImplementedError
 
-    lr_scheduler = LambdaLR(optimizer=optimizer, 
-                    lr_lambda=lambda x: utils.linear_decay(x, num_updates))
-
     print(actor_critic)
     logging.info('Number of parameters =\t{}'.format(num_parameters))
     logging.info("Total number of updates: {}".format(num_updates))
     logging.info("Learning rate: {}".format(opt['lr']))
+    # utils.print_header()
 
     start = time.time()
 
@@ -612,6 +644,9 @@ def main(_run,
                                         img_pointer_test)
                                     )
 
+            # if torch.sum(masks) == 0:
+                # pdb.set_trace()
+
             # Save in rollouts (for loss computation)
             rollouts.insert(step, reward, masks)
 
@@ -630,7 +665,7 @@ def main(_run,
         # Compute bootstrapped value
         with torch.no_grad():
             policy_return = actor_critic(
-                current_memory=current_memory
+                current_memory=current_memory,
                 )
 
         next_value = policy_return.value_estimate
@@ -664,9 +699,6 @@ def main(_run,
 
         optimizer.step()
 
-        if opt['use_scheduler']:
-            lr_scheduler.step()
-
         if not retain_graph:
             current_memory['states'] = utils.detach_state(current_memory['states'])
 
@@ -686,3 +718,4 @@ def main(_run,
 
     # Save final model
     utils.save_model(id_tmp_dir, 'model_final', actor_critic, _run)
+    # os.remove(id_tmp_dir)

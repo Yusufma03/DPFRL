@@ -1,5 +1,7 @@
 seed : 
 
+test_id: 1
+
 # True/False/auto
 cuda : auto
 
@@ -19,7 +21,6 @@ opt:
   lr : 3.0e-04
   eps : 1.0e-05
   max_grad_norm : 0.5
-  use_scheduler: False
 
 rl_setting:
   gamma : 0.99
@@ -30,17 +31,26 @@ log:
   log_interval : 100
   save_model_interval : 0
 
+  save_reconstruction_interval: 0
+  save_particle_reconstruction: False
+  predicted_times: [0,1,2,3,4,5,10]
+
   tmp_dir : './tmp/gym/'
 
 loss_function:
   # Num_updates = num_frames//num_steps//num_processes
-  num_frames : 5.0e07
+  num_frames : 50.0e06
+  # action_loss: 1
   action_loss_coef : 1.
   entropy_coef : 0.01
   value_loss_coef : 0.5
+  encoding_loss_coef: 0.1
+  reward_coef: 0.1
 
 algorithm:
   use_particle_filter : False
+  type: PFGRU
+
   # BPTT for num_steps * multiplier_backprop_length
   multiplier_backprop_length : 5
 
@@ -58,12 +68,16 @@ algorithm:
     # RNN dimension
     h_dim: 256 #  = z_dim
 
-    encoder_batch_norm: True
-    policy_batch_norm: True
+    encoder_batch_norm: False
+    policy_batch_norm: False
+
+
+    num_features: 256
 
     dropout: 0.1
 
-    num_particles: 15
-
+  particle_filter:
+    num_particles : 15
     particle_aggregation: mgf # options: gru, mean, mgf, mgf_noconv
-    num_features: 256
+    z_dim : 256
+    prior_loss_coef: 1.0

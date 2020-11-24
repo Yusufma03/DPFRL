@@ -5,8 +5,7 @@ import ipdb as pdb
 import torch.nn.functional as F
 
 class PFRNNBaseCell(nn.Module):
-    """
-    This class implements the base PFRNN class.
+    """parent class for PFRNNs
     """
     def __init__(self, num_particles, input_size, hidden_size, resamp_alpha,
             use_resampling, activation):
@@ -53,7 +52,13 @@ class PFRNNBaseCell(nn.Module):
         indices = offset + indices * batch_size
         flatten_indices = indices.view(-1, 1).squeeze()
 
-        particles_new = particles[flatten_indices]
+        # PFLSTM
+        if type(particles) == tuple:
+            particles_new = (particles[0][flatten_indices],
+                    particles[1][flatten_indices])
+        # PFGRU
+        else:
+            particles_new = particles[flatten_indices]
 
         prob_new = torch.exp(prob.view(-1, 1)[flatten_indices])
         prob_new = prob_new / (self.resamp_alpha * prob_new + (1 -
@@ -73,7 +78,6 @@ class PFRNNBaseCell(nn.Module):
         Returns:
             tensor -- sample
         """
-
         std = torch.nn.functional.softplus(var)
         if torch.cuda.is_available():
             eps = torch.cuda.FloatTensor(std.shape).normal_()
@@ -84,18 +88,15 @@ class PFRNNBaseCell(nn.Module):
 
 
 class PFGRUCell(PFRNNBaseCell):
-    def __init__(self, num_particles, input_size, obs_size, hidden_size, resamp_alpha,
-            use_resampling, activation):
+    def __init__(self, num_particles, input_size, obs_size, hidden_size, resamp_alpha, use_resampling, activation):
         super().__init__(num_particles, input_size, hidden_size, resamp_alpha,
                 use_resampling, activation)
-
-        self.obs_size = obs_size
 
         self.fc_z = nn.Linear(self.h_dim + self.input_size, self.h_dim)
         self.fc_r = nn.Linear(self.h_dim + self.input_size, self.h_dim)
         self.fc_n = nn.Linear(self.h_dim + self.input_size, self.h_dim * 2)
 
-        self.fc_obs = nn.Linear(self.h_dim + self.obs_size, 1)
+        self.fc_obs = nn.Linear(self.h_dim + self.input_size, 1)
 
 
     def forward(self, input_, hx):
@@ -108,8 +109,9 @@ class PFGRUCell(PFRNNBaseCell):
         Returns:
             tuple -- new tensor
         """
+
         h0, p0 = hx
-        obs_in = input_[:, :self.obs_size]
+        obs_in = input_
 
         z = torch.sigmoid(self.fc_z(torch.cat((h0, input_), dim=1)))
         r = torch.sigmoid(self.fc_r(torch.cat((h0, input_), dim=1)))
@@ -119,7 +121,7 @@ class PFGRUCell(PFRNNBaseCell):
         n = self.reparameterize(mu_n, var_n)
 
         if self.activation == 'relu':
-            # if we use relu as the activation, batch norm is required
+            # if we use relu as the activation, batch norm is require
             n = n.view(self.num_particles, -1, self.h_dim).transpose(0,
                     1).contiguous()
             n = self.batch_norm(n)
@@ -128,11 +130,22 @@ class PFGRUCell(PFRNNBaseCell):
         elif self.activation == 'tanh':
             n = torch.tanh(n)
         else:
-            raise NotImplementedError
+            raise ModuleNotFoundError
 
         h1 = (1 - z) * n + z * h0
 
-        # energy-based weight learning
+        p1 = self.observation_likelihood(h1, obs_in, p0)
+
+        if self.use_resampling:
+            h1, p1 = self.resampling(h1, p1)
+
+        p1 = p1.view(-1, 1)
+
+        return h1, p1
+
+    def observation_likelihood(self, h1, obs_in, p0):
+        """observation function based on compatibility function
+        """
         logpdf_obs = self.fc_obs(torch.cat((h1, obs_in), dim=1))
 
         p1 = logpdf_obs + p0
@@ -140,15 +153,4 @@ class PFGRUCell(PFRNNBaseCell):
         p1 = p1.view(self.num_particles, -1, 1)
         p1 = nn.functional.log_softmax(p1, dim=0)
 
-        # soft resampling
-        if self.use_resampling:
-            h1, p1 = self.resampling(h1, p1)
-
-        p1 = p1.view(-1, 1)
-
-        return (h1, p1)
-
-    def step(self, input_, hx):
-        state_tuple = self.forward(input_, hx)
-
-        return state_tuple
+        return p1

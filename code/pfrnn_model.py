@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Variable
 from policy import Categorical, DiagGaussian
 from torch.nn.init import xavier_normal_, orthogonal_
-import encoder_decoder
+import encoder
 import namedlist
 from operator import mul
 from functools import reduce
@@ -23,10 +24,8 @@ PolicyReturn = namedlist.namedlist('PolicyReturn', [
 
 
 class Policy(nn.Module):
+    """parent class for the policy
     """
-    Parent class to the PFRL policy
-    """
-
     def __init__(self, action_space, encoding_dimension):
         super().__init__()
 
@@ -58,21 +57,19 @@ class Policy(nn.Module):
             NotImplementedError: this should be provided by the child class
         """
 
-        raise NotImplementedError
+        raise NotImplementedError("Should be provided by child class, e.g. RNNPolicy or DVRLPolicy.")
 
     def new_latent_state(self):
         """
-        To be provided by child class.
+        To be provided by child class. Creates either n_s latent tensors for RNN or n_s particle
+        ensembles for DVRL.
         """
-        raise NotImplementedError
+        raise NotImplementedError("Should be provided by child class, e.g. RNNPolicy or DVRLPolicy.")
 
     def vec_conditional_new_latent_state(self, latent_state, mask):
-        """To be provided by child class. Creates a new latent state for each environment in which the episode ended
-        
-        Raises:
-            NotImplementedError: to be provided by child class
         """
-        raise NotImplementedError
+        To be provided by child class. Creates a new latent state for each environment in which the episode ended.
+        """
 
     def forward(self, current_memory, deterministic=False):
         """Run the model and compute all the stuff we needed, see PolicyReturn namedTuple
@@ -97,15 +94,17 @@ class Policy(nn.Module):
             else:
                 return state.to(device)
 
-        state_tuple, merged_state = self.encode(
-            observation=current_memory['current_obs'].to(device),
-            actions=current_memory['oneHotActions'].to(device).detach(),
-            previous_latent_state=cudify_state(current_memory['states'],
-                                               device)
-        )
 
+        state_tuple, merged_state = self.encode(
+                observation=current_memory['current_obs'].to(device),
+                actions=current_memory['oneHotActions'].to(device).detach(),
+                previous_latent_state=cudify_state(current_memory['states'],
+                    device),
+            )
+
+        # Apply batch norm if so configured
         if self.policy_batch_norm:
-            merged_state = self.encoding_bn(merged_state)
+            state = self.encoding_bn(merged_state)
 
         # Fill up policy_return with return values
         policy_return.latent_state = state_tuple
@@ -128,10 +127,6 @@ class Policy(nn.Module):
 
 
 class PFRNN_Policy(Policy):
-    """
-    The PFRNN policy class.
-    """
-
     def __init__(self,
                  action_space,
                  nr_inputs,
@@ -144,9 +139,9 @@ class PFRNN_Policy(Policy):
                  batch_size,
                  resample,
                  dropout=0.1,
-                 num_particles=15,
+                 num_particles=10,
                  num_features=256,
-                 particle_aggregation='mgf'
+                 particle_aggregation='mgf',
                  ):
         """The PFRNN policy class
         
@@ -181,22 +176,21 @@ class PFRNN_Policy(Policy):
         self.observation_type = observation_type
         self.resample = resample
         self.dropout = dropout
-        self.num_particles = num_particles
         self.particle_aggregation = particle_aggregation
         self.num_features = num_features
 
         # All encoders and decoders are define centrally in one file
-        self.encoder = encoder_decoder.get_encoder(
+        self.encoder = encoder.get_encoder(
             observation_type,
             nr_inputs,
             cnn_channels,
             batch_norm=encoder_batch_norm
         )
 
-        self.cnn_output_dimension = encoder_decoder.get_cnn_output_dimension(
+        self.cnn_output_dimension = encoder.get_cnn_output_dimension(
             observation_type,
             cnn_channels
-        )
+            )
         self.cnn_output_number = reduce(mul, self.cnn_output_dimension, 1)
 
         # Actions are encoded using one FC layer.
@@ -216,10 +210,10 @@ class PFRNN_Policy(Policy):
                     nn.Linear(action_shape, action_encoding),
                     nn.ReLU())
 
-        # initialize the PFGRU
+        self.num_particles = num_particles
         self.rnn = PFGRUCell(self.num_particles, self.cnn_output_number +
-                             action_encoding, self.cnn_output_number, h_dim, 0.9, 
-                             True, 'relu')
+            action_encoding, self.cnn_output_number, h_dim, 0.9, True,
+            'relu')
 
         # initialize the particle aggregator for belief approximation
         if self.particle_aggregation == 'mgf':
@@ -229,10 +223,10 @@ class PFRNN_Policy(Policy):
         elif self.particle_aggregation == 'gru':
             agg = GRU_Aggregator
         else:
-            raise NotImplementedError
+            raise NotImplementedErro
 
         self.agg = agg(self.num_particles, self.num_features,
-                       self.h_dim, self.cnn_output_number)
+                self.h_dim, self.cnn_output_number)
 
         if observation_type == 'fc':
             self.obs_criterion = nn.MSELoss()
@@ -250,13 +244,17 @@ class PFRNN_Policy(Policy):
         h0 = torch.zeros(self.batch_size * self.num_particles, self.h_dim)
         p0 = torch.zeros(self.batch_size * self.num_particles, 1)
         return (h0, p0)
+        
+    def logpdf(self, value, mean, var):
+        return torch.sum((-0.5 * (value - mean)**2 / var - 0.5 * 
+            torch.log(2 * var * np.pi)), dim=1)
+
 
     def vec_conditional_new_latent_state(self, latent_states, masks):
         """
         Set latent state to 0 when new episode beings.
         Masks and latent_states contain the values for each of the 16 environments.
         """
-        masks = masks.repeat(self.num_particles, 1)
         h0 = latent_states[0]
         p0 = latent_states[1]
         return (h0 * masks, p0 * masks)
@@ -277,16 +275,6 @@ class PFRNN_Policy(Policy):
                     except:
                         pass
 
-                if classname.find('PFGRU') != -1:
-                    xavier_normal(m.fc_z.weight.data)
-                    xavier_normal(m.fc_r.weight.data)
-                    kaimin_normal(m.fc_n.weight.data, nonlinearity='relu')
-                    orthogonal(m.fc_obs.weight.data, gain=gain)
-                    m.fc_z.bias.data.fill_(0)
-                    m.fc_r.bias.data.fill_(0)
-                    m.fc_n.bias.data.fill_(0)
-                    m.fc_obs.bias.data.fill_(0)
-
             return fn
 
         self.apply(weights_init())
@@ -294,21 +282,22 @@ class PFRNN_Policy(Policy):
             self.dist.fc_mean.weight.data.mul_(0.01)
 
     def encode(self, observation, actions, previous_latent_state):
-
         x = self.encoder(observation)
         x = x.view(-1, self.cnn_output_number)
 
         encoded_actions = None
-        encoded_actions = self.action_encoder(actions)
-        encoded_actions = F.relu(encoded_actions)
-        x_act = torch.cat([x, encoded_actions], dim=1)
+        if hasattr(self, 'action_encoder'):
+            encoded_actions = self.action_encoder(actions)
+            encoded_actions = F.relu(encoded_actions)
+            x_act = torch.cat([x, encoded_actions], dim=1)
 
-        x_reshape = x_act.repeat(self.num_particles, 1)
-        latent_state = self.rnn.step(x_reshape, previous_latent_state)
+        # GRU
+        if hasattr(self, 'rnn'):
+            x_reshape = x_act.repeat(self.num_particles, 1)
+            latent_state = self.rnn(x_reshape, previous_latent_state)
 
         state_tuple = latent_state
 
-        merged_state, particles, weight = self.agg(
-            state_tuple[0], state_tuple[-1])
+        merged_state, particles, weight = self.agg(state_tuple[0], state_tuple[-1])
 
         return state_tuple, merged_state
