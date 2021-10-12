@@ -1,7 +1,7 @@
 namedlist==1.7
 pymongo==3.8.0
 matplotlib==2.1.2
-opencv_python==4.1.0.25
+opencv_python==4.1.1.26
 sacred==0.7.4
 docopt==0.6.2
 pybullet==2.5.3
